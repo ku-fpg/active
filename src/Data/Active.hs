@@ -466,6 +466,35 @@ activeDeadline :: Deadline t a => t -> Active t (a -> a -> a)
 activeDeadline = fromDynamic . transitionDeadline
 
 ------------------------------------------------------------
+--  Behavior
+------------------------------------------------------------
+
+data Behavior t a = Behavior (MaybeApply ((->) t) a)
+
+instance Newtype (Behavior t a) (MaybeApply ((->) t) a) where
+  pack              = Behavior
+  unpack (Behavior m) = m
+
+instance (Clock t, Semigroup a) => Semigroup (Behavior t a) where
+  (<>) = (over2 Behavior . over2 MaybeApply) combine
+   where
+    combine (Right m1) (Right m2)
+      = Right (m1 <> m2)
+
+    combine (Left f) (Right m)
+      = Left (f <> const m)
+
+    combine (Right m) (Left f)
+      = Left (const m <> f)
+
+    combine (Left d1) (Left d2)
+      = Left (d1 <> d2)
+
+instance (Clock t, Monoid a, Semigroup a) => Monoid (Behavior t a) where
+  mempty  = Behavior (MaybeApply (Right mempty))
+  mappend = (<>)
+
+------------------------------------------------------------
 --  Combinators
 ------------------------------------------------------------
 
