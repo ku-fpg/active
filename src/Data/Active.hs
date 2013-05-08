@@ -78,7 +78,8 @@
 --
 -----------------------------------------------------------------------------
 
-module Data.Active
+module Data.Active where
+{-
        ( -- * Representing time
 
          -- ** Time and duration
@@ -150,6 +151,7 @@ module Data.Active
        , FractionalOf(..)
 
        ) where
+-}
 
 import Control.Applicative
 import Control.Arrow ((&&&))
@@ -293,6 +295,7 @@ end (Era (_, Max t)) = t
 duration :: (Clock t) => Era t -> Diff t
 duration = (.-.) <$> end <*> start
 
+
 ------------------------------------------------------------
 -- Dynamic
 ------------------------------------------------------------
@@ -302,8 +305,6 @@ duration = (.-.) <$> end <*> start
 --   will be mostly an internal implementation detail and that
 --   'Active' will be most commonly used.  But you never know what
 --   uses people might find for things.
-
-type Transition t a = Dynamic t a       -- proposed name for Dynamic
 
 data Dynamic t a = Dynamic { era        :: Era t
                            , runDynamic :: t -> a
@@ -376,12 +377,16 @@ transitionDeadline dl = mkDynamic dl dl (\ t -> choose t dl)
 --
 --   The addition of constant values enable 'Monoid' and 'Applicative'
 --   instances for 'Active'.
-newtype Active t a = Active (MaybeApply (Dynamic t) a)
-  deriving (Functor, Apply, Applicative)
 
-instance Newtype (Active t a) (MaybeApply (Dynamic t) a) where
-  pack              = Active
-  unpack (Active m) = m
+data Active t a = Active   { era'       :: Era t
+                           , behavior'  :: Behavior t a
+                           }
+  deriving (Functor)
+
+type Transition t a = Active t a       -- proposed name for Active
+
+instance (Clock t) => Apply (Active t) where
+  (Active d1 f1) <.> (Active d2 f2) = Active (d1 <> d2) (f1 <.> f2)
 
 instance Newtype (MaybeApply f a) (Either (f a) a) where
   pack   = MaybeApply
@@ -397,73 +402,50 @@ over2 _ f n1 n2 = pack (f (unpack n1) (unpack n2))
 --   instance of 'Semigroup'.  Two active values are combined
 --   pointwise; the resulting value is constant iff both inputs are.
 instance (Clock t, Semigroup a) => Semigroup (Active t a) where
-  (<>) = (over2 Active . over2 MaybeApply) combine
-   where
-    combine (Right m1) (Right m2)
-      = Right (m1 <> m2)
-
-    combine (Left (Dynamic dur f)) (Right m)
-      = Left (Dynamic dur (f <> const m))
-
-    combine (Right m) (Left (Dynamic dur f))
-      = Left (Dynamic dur (const m <> f))
-
-    combine (Left d1) (Left d2)
-      = Left (d1 <> d2)
-
-instance (Clock t, Monoid a, Semigroup a) => Monoid (Active t a) where
-  mempty  = Active (MaybeApply (Right mempty))
-  mappend = (<>)
-
--- | Create an 'Active' value from a 'Dynamic'.
-fromDynamic :: Dynamic t a -> Active t a
-fromDynamic = Active . MaybeApply . Left
+  Active d1 f1 <> Active d2 f2 = Active (d1 <> d2) (f1 <> f2)
 
 -- | Create a dynamic 'Active' from a start time, an end time, and a
 --   time-varying value.
-mkActive :: t -> t -> (t -> a) -> Active t a
-mkActive s e f = fromDynamic (mkDynamic s e f)
+mkActive :: (Clock t) => t -> t -> (Behavior t a) -> Active t a
+mkActive s e f = Active (mkEra s e) (clamp (mkEra s e) f)
 
 -- | Fold for 'Active's.  Process an 'Active a', given a function to
 --   apply if it is a pure (constant) value, and a function to apply if
 --   it is a 'Dynamic'.
-onActive :: (a -> b) -> (Dynamic t a -> b) -> Active t a -> b
-onActive f _ (Active (MaybeApply (Right a))) = f a
-onActive _ f (Active (MaybeApply (Left d)))  = f d
+onActive :: (t -> t -> Behavior t a -> b) -> Active t a -> b
+onActive f (Active e b) = f (start e) (end e) b
 
 -- | Modify an 'Active' value using a case analysis to see whether it
 --   is constant or dynamic.
-modActive :: (Clock t) => (a -> b) -> (Dynamic t a -> Dynamic t b) -> Active t a -> Active t b
-modActive f g = onActive (pure . f) (fromDynamic . g)
+modActive :: (Clock t) => (Behavior t a -> Behavior t b) -> Active t a -> Active t b
+modActive f = onActive (\ t1 t2 b -> mkActive t1 t2 (f b))
 
 -- | Interpret an 'Active' value as a function from time.
 runActive :: Active t a -> (t -> a)
-runActive = onActive const runDynamic
+runActive = onActive (\ _ _ b -> runBehavior b)
 
 -- | Get the value of an @Active a@ at the beginning of its era.
 activeStart :: Active t a -> a
-activeStart = onActive id (onDynamic $ \s _ d -> d s)
+activeStart = onActive (\ s _ d -> runBehavior d s)
 
 -- | Get the value of an @Active a@ at the end of its era.
 activeEnd :: Active t a -> a
-activeEnd = onActive id (onDynamic $ \_ e d -> d e)
+activeEnd = onActive (\ _ e d -> runBehavior d e)
 
 -- | Get the 'Era' of an 'Active' value (or 'Nothing' if it is
 --   a constant/pure value).
-activeEra :: Active t a -> Maybe (Era t)
-activeEra = onActive (const Nothing) (Just . era)
+activeEra :: Active t a -> Era t
+activeEra = onActive (\ s e _ -> mkEra s e)
 
--- | Test whether an 'Active' value is constant.
-isConstant :: Active t a -> Bool
-isConstant = onActive (const True) (const False)
+-- | Shift a 'Active' value by a certain duration.
+shiftActive :: (Clock t) => Diff t -> Active t a -> Active t a
+shiftActive sh =
+  onActive $ \s e d ->
+    mkActive
+      (s .+^ sh)
+      (e .+^ sh)
+      (modBehavior id (\ f t -> f (t .-^ sh)) d)
 
--- | Test whether an 'Active' value is 'Dynamic'.
-isDynamic :: Active t a -> Bool
-isDynamic = onActive (const False) (const True)
-
--- | take the first value until a deadline, then take the second value, inside an 'Active'.
-activeDeadline :: Deadline t a => t -> Active t (a -> a -> a)
-activeDeadline = fromDynamic . transitionDeadline
 
 ------------------------------------------------------------
 --  Behavior
@@ -512,10 +494,13 @@ onBehavior _ f (Behavior (MaybeApply (Left d)))  = f d
 modBehavior :: (Clock t) => (a -> b) -> ((t -> a) -> (t -> b)) -> Behavior t a -> Behavior t b
 modBehavior f g = onBehavior (pure . f) (mkBehavior . g)
 
-
 -- | Interpret an 'Active' value as a function from time.
 runBehavior :: Behavior t a -> (t -> a)
 runBehavior = onBehavior const ($)
+
+-- | take the first value until a deadline, then take the second value, inside an 'Active'.
+behaviorDeadline :: Deadline t a => t -> Behavior t (a -> a -> a)
+behaviorDeadline dl = mkBehavior (\ t -> choose t dl)
 
 ------------------------------------------------------------
 --  Combinators
@@ -547,15 +532,15 @@ ui = interval (toTime 0) (toTime 1)
 -- | @interval a b@ is an active value starting at time @a@, ending at
 --   time @b@, and taking the value @t@ at time @t@.
 interval :: (Clock t, FractionalOf t a) => t -> t -> Active t a
-interval a b = mkActive a b fromTime
+interval a b = mkActive a b (clamp (mkEra a b) $ mkBehavior fromTime)
 
 -- | @stretch s act@ \"stretches\" the active @act@ so that it takes
 --   @s@ times as long (retaining the same start time).
 stretch :: (Clock t) => Rational -> Active t a -> Active t a
-stretch 0 = modActive id . onDynamic $ \s e d -> mkDynamic s s d
-stretch str = modActive id . onDynamic $ \s e d ->
-    mkDynamic s (s .+^ (fromRational str *^ (e .-. s)))
-      (\t -> d (s .+^ ((t .-. s) ^/ fromRational str)))
+stretch 0 = onActive $ \ s e d -> mkActive s s $ clamp (mkEra s s) d
+stretch str = onActive $ \s e d ->
+    mkActive s (s .+^ (fromRational str *^ (e .-. s)))
+        (modBehavior id (\ f t -> f (s .+^ ((t .-. s) ^/ fromRational str))) d)
 
 -- | @stretchTo d@ 'stretch'es an 'Active' so it has duration @d@.
 --   Has no effect if (1) @d@ is non-positive, or (2) the 'Active'
@@ -563,22 +548,25 @@ stretch str = modActive id . onDynamic $ \s e d ->
 -- [AJG: conditions (1) and (3) no longer true: to consider changing]
 
 stretchTo :: (Deadline t a) => Diff t -> Active t a -> Active t a
-stretchTo diff = modActive id . onDynamic $ \s e d ->
-    mkDynamic s (s .+^ diff)
-        (\ t -> choose (s .+^ diff) s
-                     (d s)      -- avoiding dividing by zero
-                     (d (s .+^ (((t .-. s) ^/ (fromDuration diff / fromDuration (e .-. s)))))))
+stretchTo diff = onActive $ \s e d ->
+    mkActive s (s .+^ diff)
+        (onBehavior pure
+                (\ f -> mkBehavior $ \ t ->
+                        choose (s .+^ diff) s
+                               (f s)      -- avoiding dividing by zero
+                               (f (s .+^ (((t .-. s) ^/ (fromDuration diff / fromDuration (e .-. s)))))))
+                d)
 
 -- | @a1 \`during\` a2@ 'stretch'es and 'shift's @a1@ so that it has the
---   same era as @a2@.  Has no effect if either of @a1@ or @a2@ are constant.
+--   same era as @a2@.
 during :: (Deadline t a) => Active t a -> Active t a -> Active t a
-during a1 a2 = maybe a1 (\(d,s) -> stretchTo d . atTime s $ a1)
-                 ((duration &&& start) <$> activeEra a2)
+during a1 a2 = (\(d,s) -> stretchTo d . atTime s $ a1)
+                 ((duration &&& start) $ activeEra a2)
 
 -- | @shift d act@ shifts the start time of @act@ by duration @d@.
 --   Has no effect on constant values.
 shift :: (Clock t) => Diff t -> Active t a -> Active t a
-shift sh = modActive id (shiftDynamic sh)
+shift sh = shiftActive sh
 
 -- | Reverse an active value so the start of its era gets mapped to
 --   the end and vice versa.  For example, @backwards 'ui'@ can be
@@ -586,124 +574,39 @@ shift sh = modActive id (shiftDynamic sh)
 --
 --   <<http://www.cis.upenn.edu/~byorgey/hosted/backwards.png>>
 backwards :: (Clock t) => Active t a -> Active t a
-backwards =
-  modActive id . onDynamic $ \s e d ->
-    mkDynamic s e
-      (\t -> d (s .+^ (e .-. t)))
-
+backwards = onActive $ \s e d -> mkActive s e
+      (modBehavior id (\ f t -> f (s .+^ (e .-. t))) d)
 
 -- | Take a \"snapshot\" of an active value at a particular time,
---   resulting in a constant value.
-snapshot :: (Clock t) => t -> Active t a -> Active t a
+--   resulting in a constant behavior.
+snapshot :: (Clock t) => t -> Active t a -> Behavior t a
 snapshot t a = pure (runActive a t)
 
--- | \"Clamp\" an active value so that it is constant before and after
---   its era.  Before the era, @clamp a@ takes on the value of @a@ at
---   the start of the era.  Likewise, after the era, @clamp a@ takes
---   on the value of @a@ at the end of the era. @clamp@ has no effect
---   on constant values.
---
---   For example, @clamp 'ui'@ can be visualized as
---
---   <<http://www.cis.upenn.edu/~byorgey/hosted/clamp.png>>
---
---   See also 'clampBefore' and 'clampAfter', which clamp only before
---   or after the era, respectively.
+-- | 'clamp' a behavior to inside an era. All 'Behavior's
+-- inside Active *must* be clamped.
+clamp :: (Clock t) => Era t -> Behavior t a -> Behavior t a
+clamp e = modBehavior id (\ f t -> f (lastTime (start e) (firstTime (end e) t)))
 
-clamp :: Clock t => Active t a -> Active t a
-clamp =
-  modActive id . onDynamic $ \s e d ->
-    mkDynamic s e
-      (\t -> d (firstTime (lastTime t s) e))
+-- | Set the era of an 'Behavior' value.
+capture :: (Clock t) => Era t -> Behavior t a -> Active t a
+capture er = mkActive (start er) (end er) . clamp er
 
--- | \"Clamp\" an active value so that it is constant before the start
---   of its era. For example, @clampBefore 'ui'@ can be visualized as
---
---   <<http://www.cis.upenn.edu/~byorgey/hosted/clampBefore.png>>
---
---   See the documentation of 'clamp' for more information.
-clampBefore :: Active t a -> Active t a
-clampBefore = undefined
-
--- | \"Clamp\" an active value so that it is constant after the end
---   of its era.  For example, @clampBefore 'ui'@ can be visualized as
---
---   <<http://www.cis.upenn.edu/~byorgey/hosted/clampAfter.png>>
---
---   See the documentation of 'clamp' for more information.
-clampAfter :: Active t a -> Active t a
-clampAfter = undefined
-
--- | \"Trim\" an active value so that it is empty outside its era.
---   @trim@ has no effect on constant values.
---
---   For example, @trim 'ui'@ can be visualized as
---
---   <<http://www.cis.upenn.edu/~byorgey/hosted/trim.png>>
---
---   Actually, @trim ui@ is not well-typed, since it is not guaranteed
---   that @ui@'s values will be monoidal (and usually they won't be)!
---   But the above image still provides a good intuitive idea of what
---   @trim@ is doing. To make this precise we could consider something
---   like @trim (First . Just <$> ui)@.
---
---   See also 'trimBefore' and 'trimActive', which trim only before or
---   after the era, respectively.
-
-trim :: (Clock t, Deadline t a, Monoid a) => Active t a -> Active t a
-trim =
-  modActive id . onDynamic $ \s e d ->
-    mkDynamic s e
-      (\t -> choose s t (choose t e (d t) mempty) mempty)
-
-
--- | \"Trim\" an active value so that it is empty /before/ the start
---   of its era. For example, @trimBefore 'ui'@ can be visualized as
---
---   <<http://www.cis.upenn.edu/~byorgey/hosted/trimBefore.png>>
---
---   See the documentation of 'trim' for more details.
-trimBefore :: (Clock t, Deadline t a, Monoid a) => Active t a -> Active t a
-trimBefore =
-  modActive id . onDynamic $ \s e d ->
-    mkDynamic s e
-      (\t -> choose s t (d t) mempty)
-
--- | \"Trim\" an active value so that it is empty /after/ the end
---   of its era.  For example, @trimAfter 'ui'@ can be visualized as
---
---   <<http://www.cis.upenn.edu/~byorgey/hosted/trimAfter.png>>
---
---   See the documentation of 'trim' for more details.
-trimAfter :: (Clock t, Deadline t a, Monoid a) => Active t a -> Active t a
-trimAfter =
-  modActive id . onDynamic $ \s e d ->
-    mkDynamic s e
-      (\t -> choose t e (d t) mempty)
-
--- | Set the era of an 'Active' value.  Note that this will change a
---   constant 'Active' into a dynamic one which happens to have the
---   same value at all times.
-setEra :: Era t -> Active t a -> Active t a
-setEra er =
-  onActive
-    (mkActive (start er) (end er) . const)
-    (fromDynamic . onDynamic (\_ _ -> mkDynamic (start er) (end er)))
+observe :: (Clock t) => Active t a -> Behavior t a
+observe = onActive $ \ s e d -> d
 
 -- | @atTime t a@ is an active value with the same behavior as @a@,
 --   shifted so that it starts at time @t@.  If @a@ is constant it is
 --   returned unchanged.
 atTime :: Clock t => t -> Active t a -> Active t a
-atTime t a = maybe a (\e -> shift (t .-. start e) a) (activeEra a)
+atTime t a = (\e -> shift (t .-. start e) a) (activeEra a)
 
 -- | @a1 \`after\` a2@ produces an active that behaves like @a1@ but is
 --   shifted to start at the end time of @a2@.  If either @a1@ or @a2@
 --   are constant, @a1@ is returned unchanged.
 after :: Clock t => Active t a -> Active t a -> Active t a
-after a1 a2 = maybe a1 ((`atTime` a1) . end) (activeEra a2)
+after a1 a2 = ((`atTime` a1) . end) (activeEra a2)
 
 infixr 5 ->>
-
 
 -- XXX illustrate
 
@@ -719,21 +622,21 @@ a1 ->> a2 = a1 <> (a2 `after` a1)
 -- | \"Splice\" two 'Active' values together: shift the second to
 --   start immediately after the first (using 'after'), and produce
 --   the value which acts like the first up to the common end/start
---   point, then like the second after that.  If both are constant,
---   return the first.
+--   point, then like the second after that.
 (|>>) :: (Deadline t a) => Active t a -> Active t a -> Active t a
-a1 |>> a2 = onActive pure (\ d1 ->
-                activeDeadline (end (era d1))
-                        <.> a1
-                        <.> (a2 `after` a1)
-          ) a1
+a1 |>> a2 = turn <.> a1 <.> a3
+  where
+       a3 = a2 `after` a1
+       dl = end $ activeEra a1
+       turn = capture (activeEra a1 <> activeEra a3)
+                      (behaviorDeadline dl)
 
 -- XXX implement 'movie' with a balanced fold
 
 -- | Splice together a list of active values using '|>>'.  The list
 --   must be nonempty.
-movie :: (Deadline t a) => [Active t a] -> Active t a
-movie = foldr1 (|>>)
+--movie :: (Deadline t a) => [Active t a] -> Active t a
+--movie = foldr1 (|>>)
 
 
 ------------------------------------------------------------
@@ -769,11 +672,10 @@ discrete xs = f <$> ui
 --   value.
 simulate :: (Clock t, FractionalOf t Rational) => Rational -> Active t a -> [a]
 simulate rate =
-  onActive (:[])
-           (\d -> map (runDynamic d . toTime)
+  onActive (\ s' e' d -> map (runBehavior d . toTime)
                       (let s, e :: Rational
-                           s = fromTime $ start $ era d
-                           e = fromTime $ end   $ era d
+                           s = fromTime $ s'
+                           e = fromTime $ e'
                        in  [s, s + 1^/rate .. e]
                       )
            )
