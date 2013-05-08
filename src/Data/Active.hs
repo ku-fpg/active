@@ -469,7 +469,8 @@ activeDeadline = fromDynamic . transitionDeadline
 --  Behavior
 ------------------------------------------------------------
 
-data Behavior t a = Behavior (MaybeApply ((->) t) a)
+newtype Behavior t a = Behavior (MaybeApply ((->) t) a)
+  deriving (Functor, Apply, Applicative)
 
 instance Newtype (Behavior t a) (MaybeApply ((->) t) a) where
   pack              = Behavior
@@ -493,6 +494,28 @@ instance (Clock t, Semigroup a) => Semigroup (Behavior t a) where
 instance (Clock t, Monoid a, Semigroup a) => Monoid (Behavior t a) where
   mempty  = Behavior (MaybeApply (Right mempty))
   mappend = (<>)
+
+-- | Create a dynamic 'Active' from a start time, an end time, and a
+--   time-varying value.
+mkBehavior :: (t -> a) -> Behavior t a
+mkBehavior f = Behavior (MaybeApply (Left f))
+
+-- | Fold for 'Behavior's.  Process an 'Behavior t a', given a function to
+--   apply if it is a pure (constant) value, and a function to apply if
+--   it is a 'Dynamic'.
+onBehavior :: (a -> b) -> ((t -> a) -> b) -> Behavior t a -> b
+onBehavior f _ (Behavior (MaybeApply (Right a))) = f a
+onBehavior _ f (Behavior (MaybeApply (Left d)))  = f d
+
+-- | Modify an 'Active' value using a case analysis to see whether it
+--   is constant or dynamic.
+modBehavior :: (Clock t) => (a -> b) -> ((t -> a) -> (t -> b)) -> Behavior t a -> Behavior t b
+modBehavior f g = onBehavior (pure . f) (mkBehavior . g)
+
+
+-- | Interpret an 'Active' value as a function from time.
+runBehavior :: Behavior t a -> (t -> a)
+runBehavior = onBehavior const ($)
 
 ------------------------------------------------------------
 --  Combinators
