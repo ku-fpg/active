@@ -299,7 +299,7 @@ duration = (.-.) <$> end <*> start
 ------------------------------------------------------------
 -- Dynamic
 ------------------------------------------------------------
-
+{-
 -- | A @Dynamic a@ can be thought of as an @a@ value that changes over
 --   the course of a particular 'Era'.  It's envisioned that @Dynamic@
 --   will be mostly an internal implementation detail and that
@@ -351,7 +351,7 @@ shiftDynamic sh =
 -- | take the first value until a deadline, then take the second value, inside a Dynamic.
 transitionDeadline :: Deadline t a => t -> Dynamic t (a -> a -> a)
 transitionDeadline dl = mkDynamic dl dl (\ t -> choose t dl)
-
+-}
 ------------------------------------------------------------
 --  Active
 ------------------------------------------------------------
@@ -378,8 +378,8 @@ transitionDeadline dl = mkDynamic dl dl (\ t -> choose t dl)
 --   The addition of constant values enable 'Monoid' and 'Applicative'
 --   instances for 'Active'.
 
-data Active t a = Active   { era'       :: Era t
-                           , behavior'  :: Behavior t a
+data Active t a = Active   { era       :: Era t
+                           , behavior  :: Behavior t a
                            }
   deriving (Functor)
 
